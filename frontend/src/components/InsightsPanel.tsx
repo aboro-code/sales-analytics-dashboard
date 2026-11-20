@@ -97,8 +97,14 @@ function AiBrief({ query }: { query: ReturnType<typeof useAiSummary> }) {
           </ul>
         </>
       )}
+      {!d.verified && (
+        <p role="note" className="mt-3 text-[12px] text-bad">
+          ! Check before relying on this: {d.unverified_numbers.join(', ')} could not be matched to the data.
+        </p>
+      )}
       <p className="mt-3 text-[11px] text-ink-3">
-        Written by {d.model} from the computed facts on this page. The model copies numbers, it doesn't calculate them.
+        Written by {d.model} from the computed facts on this page.
+        {d.verified && ' ✓ Every number was checked against the data on the server.'}
       </p>
     </section>
   )

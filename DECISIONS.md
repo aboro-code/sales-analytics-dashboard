@@ -153,6 +153,15 @@ hallucinate a number**.
     what keeps quality up, not the model choice.
   - Malformed output, refusals and truncation all return an error, never a
     broken "summary".
+- **Number verification on the server:**
+  - The first live Groq summary said "top three outlets contribute over 63%".
+    That figure is a correct sum, but the model computed it, against the
+    prompt.
+  - Every number in the brief is now matched by value against the facts.
+  - A mismatch triggers one corrective retry that names the numbers. If they
+    are still unmatched, the brief is flagged (`verified: false`) and the UI
+    lists them.
+  - Prompts state intent; code enforces it.
 - **Cost control for a public URL:**
   - Called only on click.
   - Cached per normalised filter set (immutable data, so it never needs

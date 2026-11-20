@@ -290,12 +290,23 @@ top of it:
      supported via the official SDK.
    - The provider is one setting (`AI_PROVIDER`). Everything around it
      (facts, schema, caching, limits) is shared.
-3. **Cost and abuse controls:**
+3. **Number verification (a server-side check, not just the prompt):**
+   - Every number in the brief is matched by value against the facts sent to
+     the model. Years and small counts are skipped.
+   - If any number is missing, the model gets one retry that names the
+     numbers it made up.
+   - If it still fails, the brief is returned with `verified: false` and the
+     UI shows which numbers to double-check.
+   - Found on the live site: the first real Groq summary said the "top three
+     outlets contribute over 63%". That is the sum of three shares, so it is
+     correct, but the model computed it. A prompt rule alone didn't stop that;
+     this check does.
+4. **Cost and abuse controls:**
    - Results are cached per normalised filter set. The data is immutable, so
      the same view never triggers a second model call.
    - Uncached calls are capped (`AI_MAX_CALLS_PER_HOUR`, default 30).
    - The model is only called when someone clicks, never on page load.
-4. **Failure is contained:**
+5. **Failure is contained:**
    - No key means `ai_summary: false` in `/api/meta` and no button.
    - Rate limits, refusals and API errors come back as a clear message in
      the panel; the rest of the dashboard is unaffected.
@@ -450,7 +461,7 @@ Example: `GET /api/breakdown?dim=item&limit=5&outlets=Koramangala,MG Road&start=
 
 ## Testing and CI
 
-- **55 pytest tests** (`backend/tests`), running in ~1 s.
+- **58 pytest tests** (`backend/tests`), running in ~1 s.
   - **ETL:** day-first string parsing vs native datetimes, derived columns,
     and hard failures on inconsistent bills, nulls, bad dates and missing
     columns.
@@ -463,7 +474,8 @@ Example: `GET /api/breakdown?dim=item&limit=5&outlets=Koramangala,MG Road&start=
     selection, hidden when no key,
     cached per filter set (one model call), the facts payload containing only
     formatted, filter-correct numbers, rate limiting, refusals, malformed
-    model output and empty selections.
+    model output, empty selections, and the number check (a corrective retry,
+    then a flag).
   - **Real data:** the known totals (300,000 / 110,478 / ₹69,480,952), the
     aggregator-only-on-delivery rule, ₹0 rows being dips, and per-category
     revenues summing to the total.

@@ -31,6 +31,9 @@ export interface AiSummary {
   actions: string[]
   model: string
   provider: 'groq' | 'anthropic'
+  /** Every number in the brief was found in the computed facts (server-checked). */
+  verified: boolean
+  unverified_numbers: string[]
   generated_ms: number
 }
 
