@@ -489,7 +489,7 @@ Example: `GET /api/breakdown?dim=item&limit=5&outlets=Koramangala,MG Road&start=
 | Storage | Embedded DuckDB, rebuilt per deploy | **PostgreSQL** (or MotherDuck) once data is written continuously or by several services. Keep DuckDB/Parquet for analytics. |
 | Ingestion | Full rebuild from one xlsx | **Incremental ingestion:** append new days to partitioned Parquet, idempotent by `BillNo`, scheduled job, with the same validation gate |
 | Scale-out | One instance, in-process cache | Redis or a CDN in front of the read-only GET API; pre-aggregated rollups (day × outlet × channel) if data grows 100× |
-| Pagination | `OFFSET` | Keyset pagination for deep pages |
+| Pagination | `OFFSET`: page 1 takes ~2 ms, but jumping to the middle or last pages (page 6,000–12,000 of 12,000) takes ~200–450 ms on the free tier, because DuckDB has to scan up to the offset | Keyset pagination (`WHERE (sort_col, id) > (last_seen)`). Nobody pages to row 250,000 in practice; filters and sorting are how people find rows |
 | Auth | Public read-only demo (see [Why no authentication](#why-no-authentication)) | OAuth/SSO with outlet-level row filtering (a manager sees only their outlets) |
 | Insights | Rule-based facts plus an optional LLM summary of them (Groq or Claude) | Natural-language questions answered with generated SQL shown to the user; anomaly detection (z-scores on daily revenue per outlet) |
 | Analytics | Descriptive | Period-over-period deltas on KPIs, basket analysis (items bought together), forecasting |
