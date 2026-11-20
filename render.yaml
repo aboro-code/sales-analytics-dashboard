@@ -1,0 +1,24 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# New > Blueprint > pick this repo. Render builds backend/Dockerfile (which runs
+# the ETL) and serves the API on the free plan.
+services:
+  - type: web
+    name: sales-analytics-api
+    runtime: docker
+    plan: free
+    region: singapore            # closest Render region to Bengaluru
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # Exact origins allowed by CORS (comma-separated). Add a custom domain here if you use one.
+      - key: ALLOWED_ORIGINS
+        value: http://localhost:5173
+      # Covers the Vercel production URL and its preview deployments.
+      - key: ALLOWED_ORIGIN_REGEX
+        value: ^https://sales-analytics-dashboard(-[a-z0-9-]+)?\.vercel\.app$
+      - key: DUCKDB_MEMORY_LIMIT
+        value: 256MB
+      - key: CACHE_TTL_SECONDS
+        value: "3600"

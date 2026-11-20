@@ -1,0 +1,13 @@
+.git
+.venv
+**/__pycache__
+**/.pytest_cache
+**/node_modules
+frontend
+docs
+logs
+data/*.duckdb
+data/*.tmp
+data/*.wal
+*.md
+!etl/requirements.txt
