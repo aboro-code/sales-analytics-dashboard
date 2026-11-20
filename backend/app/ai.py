@@ -178,15 +178,18 @@ def unverified_numbers(brief: dict[str, Any], facts_text: str) -> list[str]:
 
     Compared as values (so "1,10,478" == "110,478" and "1.9" == "1.90"). Years and
     small integers (hours, day counts, "top 3") are skipped: they're words, not data.
+    Percentages and ₹ amounts are always checked, however small ("around 15%").
     """
     known = _numbers(facts_text)
     out = []
     for sentence in [brief["headline"], *brief["points"], *brief["actions"]]:
-        for m in _NUM.findall(sentence):
-            v = float(m.replace(",", ""))
-            if v in known or (v.is_integer() and (v <= 31 or 2000 <= v <= 2100)):
+        for m in _NUM.finditer(sentence):
+            token = m.group().rstrip(",")
+            v = float(token.replace(",", ""))
+            is_measure = sentence[m.end():m.end() + 1] == "%" or sentence[max(0, m.start() - 1):m.start()] == "₹"
+            if v in known or (not is_measure and v.is_integer() and (v <= 31 or 2000 <= v <= 2100)):
                 continue
-            out.append(m)
+            out.append(token)
     return out
 
 

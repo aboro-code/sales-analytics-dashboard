@@ -142,6 +142,9 @@ def test_unverified_numbers():
              "points": ["Top outlet has 24.0%; top three over 63%.", "Daily ₹1.90 L, peak at 8 PM in 2026."],
              "actions": ["Focus on the top 3 outlets."]}
     assert ai.unverified_numbers(brief, facts) == ["63"]
+    # Small numbers are skipped only when they're words, never as % or ₹ amounts.
+    assert ai.unverified_numbers({"headline": "Each around 15%, and ₹20 more.", "points": [], "actions": []},
+                                 facts) == ["15", "20"]
 
 
 def _groq_replies(monkeypatch, *briefs):
