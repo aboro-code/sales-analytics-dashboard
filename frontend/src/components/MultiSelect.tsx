@@ -39,7 +39,6 @@ export function MultiSelect({ label, options, selected, onChange, searchable = f
   const summary =
     selected.length === 0 ? 'All' : selected.length === 1 ? selected[0] : `${selected.length} selected`
 
-  let lastGroup: string | undefined
   return (
     <div className="relative" ref={ref}>
       <button
@@ -77,9 +76,8 @@ export function MultiSelect({ label, options, selected, onChange, searchable = f
             />
           )}
           <div className="max-h-72 overflow-y-auto">
-            {filtered.map((o) => {
-              const header = o.group && o.group !== lastGroup ? o.group : null
-              lastGroup = o.group
+            {filtered.map((o, i) => {
+              const header = o.group && o.group !== filtered[i - 1]?.group ? o.group : null
               const checked = selected.includes(o.value)
               return (
                 <div key={o.value}>

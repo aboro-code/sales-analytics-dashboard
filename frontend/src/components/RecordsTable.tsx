@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { api, type RecordRow } from '../lib/api'
 import { filterKey, type Filters } from '../lib/filters'
 import { formatDateTime, formatINR, formatNum } from '../lib/format'
@@ -24,12 +24,15 @@ const PAGE_SIZE = 25
 
 /** Server-side paginated and sorted: the browser never holds more than one page. */
 export function RecordsTable({ filters }: { filters: Filters }) {
-  const [page, setPage] = useState(1)
   const [sort, setSort] = useState<SortKey>('order_ts')
   const [order, setOrder] = useState<'asc' | 'desc'>('desc')
+  // The page belongs to a filter set: when the filters change, we're back on page 1
+  // (derived during render rather than reset in an effect).
   const key = filterKey(filters)
-
-  useEffect(() => setPage(1), [key]) // new filters -> back to page 1
+  const [pageState, setPageState] = useState({ key, page: 1 })
+  const page = pageState.key === key ? pageState.page : 1
+  const setPage = (next: number | ((p: number) => number)) =>
+    setPageState({ key, page: typeof next === 'function' ? next(page) : next })
 
   const q = useRecords(filters, page, PAGE_SIZE, sort, order)
   const total = q.data?.total ?? 0
