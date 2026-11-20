@@ -133,3 +133,40 @@ def test_groq_malformed_output_is_an_error(client, groq, monkeypatch):
         "choices": [{"finish_reason": "stop", "message": {"content": "not json"}}]})
     r = client.get("/api/ai-summary", params={"order_types": "Dine-In"})
     assert r.status_code == 502
+
+
+# ------------------------------------------------------------------ number guardrail
+def test_unverified_numbers():
+    facts = '{"revenue": "₹6.95 Cr", "orders": "1,10,478", "share": "24.0%", "x": "₹1.9 L"}'
+    brief = {"headline": "Revenue ₹6.95 Cr from 110,478 orders.",
+             "points": ["Top outlet has 24.0%; top three over 63%.", "Daily ₹1.90 L, peak at 8 PM in 2026."],
+             "actions": ["Focus on the top 3 outlets."]}
+    assert ai.unverified_numbers(brief, facts) == ["63"]
+
+
+def _groq_replies(monkeypatch, *briefs):
+    replies = iter(briefs)
+    calls = []
+
+    def fake_post(url, body, headers, timeout=60):
+        calls.append(body)
+        return {"model": body["model"], "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(next(replies))}}]}
+
+    monkeypatch.setattr(ai, "_post_json", fake_post)
+    return calls
+
+
+def test_invented_number_triggers_one_corrective_retry(client, groq, monkeypatch):
+    bad = {**BRIEF, "headline": "Revenue grew 99.7% overall."}
+    calls = _groq_replies(monkeypatch, bad, BRIEF)
+    d = client.get("/api/ai-summary", params={"groups": "Burgers"}).json()
+    assert d["verified"] is True and d["attempts"] == 2 and d["headline"] == BRIEF["headline"]
+    assert "99.7" in calls[1]["messages"][-1]["content"]  # the retry names the offending number
+
+
+def test_still_unverified_after_retry_is_flagged(client, groq, monkeypatch):
+    bad = {**BRIEF, "headline": "Revenue grew 99.7% overall."}
+    _groq_replies(monkeypatch, bad, bad)
+    d = client.get("/api/ai-summary", params={"groups": "Sides"}).json()
+    assert d["verified"] is False and d["unverified_numbers"] == ["99.7"]

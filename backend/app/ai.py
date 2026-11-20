@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -45,7 +46,10 @@ for the filters they selected.
 
 Rules:
 - Use ONLY numbers that appear in the facts, copied exactly as formatted (₹ amounts with L/Cr, \
-percentages). Never calculate, round, estimate or invent a number.
+percentages). Never calculate, add up, round, estimate or invent a number; describe combined \
+or relative sizes in words instead (e.g. "the top three outlets bring most of the revenue").
+- Keep each fact's meaning exactly as the facts state it; don't reinterpret what a percentage \
+refers to.
 - If the facts don't support a claim, leave it out.
 - Plain, direct business English. No hype, no emojis, no markdown.
 - headline: one sentence, the single most important takeaway.
@@ -162,6 +166,42 @@ def facts(db: Database, f: Filters) -> dict[str, Any]:
     }
 
 
+_NUM = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+
+def _numbers(text: str) -> set[float]:
+    return {float(m.replace(",", "")) for m in _NUM.findall(text)}
+
+
+def unverified_numbers(brief: dict[str, Any], facts_text: str) -> list[str]:
+    """Numbers in the brief that don't appear anywhere in the facts.
+
+    Compared as values (so "1,10,478" == "110,478" and "1.9" == "1.90"). Years and
+    small integers (hours, day counts, "top 3") are skipped: they're words, not data.
+    """
+    known = _numbers(facts_text)
+    out = []
+    for sentence in [brief["headline"], *brief["points"], *brief["actions"]]:
+        for m in _NUM.findall(sentence):
+            v = float(m.replace(",", ""))
+            if v in known or (v.is_integer() and (v <= 31 or 2000 <= v <= 2100)):
+                continue
+            out.append(m)
+    return out
+
+
+def _parse(text: str, model: str) -> dict[str, Any]:
+    try:
+        brief = json.loads(text)
+        assert isinstance(brief.get("headline"), str) and brief["headline"].strip()
+        assert all(isinstance(brief.get(k), list) for k in ("points", "actions"))
+    except (json.JSONDecodeError, AssertionError, AttributeError):
+        log.error("AI summary: malformed output from %s", model)
+        raise AIUnavailable("The AI summary came back malformed; try again.", status=502)
+    return {"headline": brief["headline"], "points": [str(p) for p in brief["points"]],
+            "actions": [str(a) for a in brief["actions"]]}
+
+
 def summarize(db: Database, f: Filters) -> dict[str, Any]:
     name = provider()
     if name is None:
@@ -170,21 +210,35 @@ def summarize(db: Database, f: Filters) -> dict[str, Any]:
     if not _limiter.acquire():
         raise AIUnavailable("AI summary rate limit reached; try again later.", status=429)
 
-    user = "Facts (JSON):\n" + json.dumps(data, ensure_ascii=False)
+    facts_text = json.dumps(data, ensure_ascii=False)
+    messages = [{"role": "user", "content": "Facts (JSON):\n" + facts_text}]
+    call = _call_groq if name == "groq" else _call_anthropic
     t0 = time.perf_counter()
-    text, model, usage = (_call_groq if name == "groq" else _call_anthropic)(user)
-    try:
-        brief = json.loads(text)
-        assert isinstance(brief.get("headline"), str) and brief["headline"].strip()
-        assert all(isinstance(brief.get(k), list) for k in ("points", "actions"))
-    except (json.JSONDecodeError, AssertionError, AttributeError):
-        log.error("AI summary: malformed output from %s", model)
-        raise AIUnavailable("The AI summary came back malformed; try again.", status=502)
+    text, model, usage = call(messages)
+    brief = _parse(text, model)
+
+    # Guardrail: every number must exist in the facts. One corrective retry, then flag.
+    bad = unverified_numbers(brief, facts_text)
+    attempts = 1
+    if bad:
+        log.warning("AI summary: unverified numbers %s; retrying once", bad)
+        messages += [
+            {"role": "assistant", "content": text},
+            {"role": "user", "content": f"These numbers do not appear in the facts: {', '.join(bad)}. "
+                                        "Rewrite the brief using only numbers copied from the facts; "
+                                        "describe anything else in words."},
+        ]
+        text, model, usage2 = call(messages)
+        brief = _parse(text, model)
+        usage = {k: usage[k] + usage2[k] for k in usage}
+        bad = unverified_numbers(brief, facts_text)
+        attempts = 2
 
     return {
-        "headline": brief["headline"],
-        "points": [str(p) for p in brief["points"]],
-        "actions": [str(a) for a in brief["actions"]],
+        **brief,
+        "verified": not bad,
+        "unverified_numbers": bad,
+        "attempts": attempts,
         "model": model,
         "provider": name,
         "generated_ms": round((time.perf_counter() - t0) * 1000),
@@ -192,7 +246,7 @@ def summarize(db: Database, f: Filters) -> dict[str, Any]:
     }
 
 
-def _call_anthropic(user: str) -> tuple[str, str, dict[str, int]]:
+def _call_anthropic(messages: list[dict[str, str]]) -> tuple[str, str, dict[str, int]]:
     import anthropic
 
     try:
@@ -203,7 +257,7 @@ def _call_anthropic(user: str) -> tuple[str, str, dict[str, int]]:
             fallbacks="default",
             output_config={"effort": "low", "format": {"type": "json_schema", "schema": SCHEMA}},
             system=SYSTEM,
-            messages=[{"role": "user", "content": user}],
+            messages=messages,
         )
     except anthropic.AuthenticationError:
         log.error("AI summary: invalid ANTHROPIC_API_KEY")
@@ -231,10 +285,10 @@ def _post_json(url: str, body: dict[str, Any], headers: dict[str, str], timeout:
         return json.loads(r.read())
 
 
-def _call_groq(user: str) -> tuple[str, str, dict[str, int]]:
+def _call_groq(messages: list[dict[str, str]]) -> tuple[str, str, dict[str, int]]:
     body = {
         "model": model_for("groq"),
-        "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}],
+        "messages": [{"role": "system", "content": SYSTEM}, *messages],
         # Strict mode = constrained decoding, so the reply always matches SCHEMA.
         "response_format": {"type": "json_schema",
                             "json_schema": {"name": "brief", "strict": True, "schema": SCHEMA}},
