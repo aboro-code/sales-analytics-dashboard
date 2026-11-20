@@ -11,6 +11,8 @@ Metric definitions (used consistently everywhere):
 """
 from __future__ import annotations
 
+import calendar
+from datetime import date, timedelta
 from typing import Any, Iterator
 
 from .db import Database
@@ -109,7 +111,23 @@ def summary(db: Database, f: Filters) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+def _period_bounds(period: str, granularity: str) -> tuple[date, date]:
+    if granularity == "day":
+        d = date.fromisoformat(period)
+        return d, d
+    if granularity == "week":
+        d = date.fromisoformat(period)
+        return d, d + timedelta(days=6)
+    y, m = int(period[:4]), int(period[5:7])
+    return date(y, m, 1), date(y, m, calendar.monthrange(y, m)[1])
+
+
 def timeseries(db: Database, f: Filters, granularity: str) -> list[dict[str, Any]]:
+    """
+    Points per period. ``partial`` marks a week/month that is cut off by the
+    data's or the filter's date range (e.g. the dataset ends on a Tuesday), so
+    the UI can show it differently instead of implying a collapse in sales.
+    """
     col = GRANULARITY[granularity]
     cte, p = orders_cte(f)
     rows = db.all(
@@ -118,9 +136,16 @@ def timeseries(db: Database, f: Filters, granularity: str) -> list[dict[str, Any
             FROM o GROUP BY {col} ORDER BY {col}""",
         p,
     )
+    lo, hi = db.one("SELECT MIN(order_date) AS lo, MAX(order_date) AS hi FROM orders").values()
+    lo = max(date.fromisoformat(lo), date.fromisoformat(f.start)) if f.start else date.fromisoformat(lo)
+    hi = min(date.fromisoformat(hi), date.fromisoformat(f.end)) if f.end else date.fromisoformat(hi)
     for r in rows:
         r["revenue"] = _r(r["revenue"])
         r["aov"] = _r(r["revenue"] / r["orders"]) if r["orders"] else 0
+        start, end = _period_bounds(str(r["period"]), granularity)
+        r["days"] = (min(end, hi) - max(start, lo)).days + 1
+        r["period_days"] = (end - start).days + 1
+        r["partial"] = r["days"] < r["period_days"]
     return rows
 
 

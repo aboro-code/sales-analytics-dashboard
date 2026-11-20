@@ -98,6 +98,16 @@ def test_timeseries(client, granularity, periods):
     assert sum(p["orders"] for p in pts) == TOTAL_ORDERS
 
 
+def test_timeseries_partial_periods(client):
+    # Data spans 2026-02-01 .. 2026-03-20: both months are cut off.
+    pts = get(client, "/api/timeseries", granularity="month")["points"]
+    assert [(p["days"], p["period_days"], p["partial"]) for p in pts] == [(28, 28, False), (20, 31, True)]
+    # A filter that starts mid-week makes that week partial.
+    pts = get(client, "/api/timeseries", granularity="week", start="2026-02-03")["points"]
+    assert pts[0]["period"] == "2026-02-02" and pts[0]["partial"] and pts[0]["days"] == 6
+    assert all(not p["partial"] for p in get(client, "/api/timeseries", granularity="day")["points"])
+
+
 def test_timeseries_bad_granularity(client):
     assert client.get("/api/timeseries", params={"granularity": "hour"}).status_code == 422
 
