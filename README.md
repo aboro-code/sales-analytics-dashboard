@@ -64,6 +64,12 @@ URL-shareable filters.
 - **Insights panel:** eight plain-English findings computed in SQL for the
   current filters, e.g. *"90.1% of delivery orders come through Zomato or
   Swiggy; only 9.9% are direct"*.
+- **AI summary (optional):** one click asks Claude to turn this view's
+  computed facts into a short brief for the owner (a headline, 3–4
+  observations and 2 next steps). The model gets only pre-formatted numbers
+  from SQL and is told to copy them, never compute. It is cached per filter
+  set and rate-limited, and the button only appears when the server has an
+  API key. See [AI summary](#6-ai-summary-optional).
 - **Records table:** server-side paginated and sortable raw line items, with a
   streamed **CSV export** of everything matching the filters.
 - **UX details:**
@@ -145,6 +151,8 @@ docker run -p 8000:8000 sales-api
 | `CACHE_TTL_SECONDS` / `CACHE_MAXSIZE` | API | `3600` / `512` | Response cache |
 | `DUCKDB_MEMORY_LIMIT` / `DUCKDB_THREADS` | API | `256MB` / auto | Fit small instances |
 | `WARM_CACHE` | API | `1` | Pre-compute the default dashboard at startup |
+| `ANTHROPIC_API_KEY` | API | none | Enables the optional AI summary; without it the feature is hidden |
+| `AI_MODEL` / `AI_MAX_CALLS_PER_HOUR` | API | `claude-opus-5-5` / `30` | Model for the AI summary; cap on uncached model calls |
 
 ## Architecture and decisions
 
@@ -258,6 +266,36 @@ and a fresh cache.
   validator for light and dark themes.
 - **Date presets anchor to the last date in the data**, not today. Otherwise
   "last 30 days" would be empty.
+
+### 6. AI summary (optional)
+
+The rule-based insights panel stays the source of truth. The AI summary sits on
+top of it:
+
+1. `GET /api/ai-summary` gathers the facts for the current filters: KPIs,
+   monthly revenue (partial months labelled), the outlet / order-type /
+   channel / category mix, and the 8 rule-based insights. All numbers are
+   **already formatted** (₹ with L/Cr, percentages).
+2. Claude (`claude-opus-5-5`, low effort) gets those facts as JSON. The system
+   prompt says to use only numbers that appear there, copied exactly. A JSON
+   schema (structured outputs) forces the reply into
+   `{headline, points[], actions[]}`, so the UI never parses free text.
+3. **Cost and abuse controls:**
+   - Results are cached per normalised filter set. The data is immutable, so
+     the same view never triggers a second model call.
+   - Uncached calls are capped (`AI_MAX_CALLS_PER_HOUR`, default 30).
+   - The model is only called when someone clicks, never on page load.
+4. **Failure is contained:**
+   - No key means `ai_summary: false` in `/api/meta` and no button.
+   - Rate limits, refusals and API errors come back as a clear message in
+     the panel; the rest of the dashboard is unaffected.
+   - Tests fake the client, so CI needs no key and makes no network calls.
+
+Why not let the model query the data itself (text-to-SQL, tool use)? For a
+summary, it isn't needed. It would also reintroduce the risk that rule-based
+insights remove: a wrong number stated confidently. Asking questions in
+natural language over the data is the natural next step, with the generated
+SQL shown to the user.
 
 ## Understanding the data
 
@@ -394,6 +432,7 @@ Interactive docs: **`/docs`**.
 | GET | `/api/breakdown` | `dim=outlet\|group\|item\|order_type\|settlement`, `limit` (1–100) | Per category: revenue, orders, quantity, share, revenue per order |
 | GET | `/api/heatmap` | filters | Orders and revenue per weekday (0 = Mon) × hour |
 | GET | `/api/insights` | filters | Up to 8 `{id, title, text, tone, value}` insights |
+| GET | `/api/ai-summary` | filters | Optional Claude brief `{headline, points, actions, model}`; `503` if not configured, `429` when rate-limited |
 | GET | `/api/records` | `page`, `page_size` (≤ 200), `sort`, `order=asc\|desc` | Paginated line items + `total`, `pages` |
 | GET | `/api/export.csv` | filters | Streamed CSV of all matching line items |
 
@@ -401,7 +440,7 @@ Example: `GET /api/breakdown?dim=item&limit=5&outlets=Koramangala,MG Road&start=
 
 ## Testing and CI
 
-- **46 pytest tests** (`backend/tests`), running in ~1 s.
+- **52 pytest tests** (`backend/tests`), running in ~1 s.
   - **ETL:** day-first string parsing vs native datetimes, derived columns,
     and hard failures on inconsistent bills, nulls, bad dates and missing
     columns.
@@ -410,6 +449,10 @@ Example: `GET /api/breakdown?dim=item&limit=5&outlets=Koramangala,MG Road&start=
     date ranges, empty results, `422` validation, SQL-injection attempts,
     unknown sort columns, partial periods, pagination, CSV export, cache
     HIT/MISS on reordered params, gzip and CORS.
+  - **AI summary:** with a fake Claude client. Covers hidden when no key,
+    cached per filter set (one model call), the facts payload containing only
+    formatted, filter-correct numbers, rate limiting, refusals and empty
+    selections.
   - **Real data:** the known totals (300,000 / 110,478 / ₹69,480,952), the
     aggregator-only-on-delivery rule, ₹0 rows being dips, and per-category
     revenues summing to the total.
@@ -424,14 +467,38 @@ Example: `GET /api/breakdown?dim=item&limit=5&outlets=Koramangala,MG Road&start=
 | Ingestion | Full rebuild from one xlsx | **Incremental ingestion:** append new days to partitioned Parquet, idempotent by `BillNo`, scheduled job, with the same validation gate |
 | Scale-out | One instance, in-process cache | Redis or a CDN in front of the read-only GET API; pre-aggregated rollups (day × outlet × channel) if data grows 100× |
 | Pagination | `OFFSET` | Keyset pagination for deep pages |
-| Auth | Public read-only demo | OAuth/SSO with outlet-level row filtering (a manager sees only their outlets) |
-| Insights | Rule-based templates over SQL | An **LLM layer** that rephrases and prioritises the computed facts (never computes numbers), plus anomaly detection (z-scores on daily revenue per outlet) |
+| Auth | Public read-only demo (see [Why no authentication](#why-no-authentication)) | OAuth/SSO with outlet-level row filtering (a manager sees only their outlets) |
+| Insights | Rule-based facts plus an optional Claude summary of them | Natural-language questions answered with generated SQL shown to the user; anomaly detection (z-scores on daily revenue per outlet) |
 | Analytics | Descriptive | Period-over-period deltas on KPIs, basket analysis (items bought together), forecasting |
 | Hosting | Free tier with cold starts | A paid always-on instance, or a scheduled `/health` ping to keep it warm |
 | Frontend tests | Type-check + lint + manual browser checks | Playwright smoke tests and visual regression |
 
 **Deliberate non-goals for a 3–4 hour scope:** authentication, write paths and
 multi-tenant data. The brief values clear reasoning over feature count.
+
+### Why no authentication
+
+Authentication was listed as a bonus. I left it out on purpose:
+
+- **It would get in the reviewer's way.** The deliverable is a public URL for
+  people to open and evaluate. A login wall adds friction and shared demo
+  credentials, and protects nothing.
+- **There is nothing to protect yet.** The API is read-only, holds one brand's
+  sample data and has no per-user data. Auth only means something together
+  with authorisation, such as "this manager sees only their outlets".
+- **A shallow version would be worse than none.** A hard-coded password or a
+  homemade JWT setup signals the wrong instinct for a production system.
+
+**How I'd add it:**
+1. Use an identity provider (Auth0, Clerk or Cognito) with OIDC login on the
+   frontend.
+2. Have FastAPI verify the provider's JWT (signature via JWKS, audience,
+   expiry) in a dependency, the same way filters are parsed today.
+3. Read an `outlets` claim (or a user → outlets table) and **intersect it with
+   the requested outlet filter** in `FilterParser`. Every query then becomes
+   tenant-scoped automatically, because all SQL is built from `Filters`.
+4. Make CORS stricter, include the user in the cache key, and add per-user
+   rate limits (the AI summary especially).
 
 ## Project structure
 
@@ -450,6 +517,7 @@ multi-tenant data. The brief values clear reasoning over feature count.
 │   │   ├── filters.py            filter parsing/validation, WHERE + orders CTE builders
 │   │   ├── queries.py            all analytical SQL
 │   │   ├── insights.py           rule-based insights
+│   │   ├── ai.py                 optional Claude summary of the computed facts
 │   │   └── cache.py              thread-safe LRU + TTL cache
 │   ├── tests/                    pytest (ETL, API, real-data checks)
 │   ├── scripts/bench.py          latency benchmark

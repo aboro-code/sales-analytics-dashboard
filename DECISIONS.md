@@ -97,8 +97,8 @@ hallucinate a number**.
 - "Fastest-growing category" compares the last two *complete* months inside the
   selected range, and ignores categories under 5% of revenue. Otherwise Extras
   (≈1% of revenue) "wins" on noise.
-- An LLM layer could later rephrase or rank these facts, but it would be fed
-  the computed facts and never asked to compute them.
+- An LLM layer can rephrase or rank these facts, but it is fed the computed
+  facts and never asked to compute them. That is now built: see D11.
 
 ## D9: Charts follow a validated palette and avoid dual axes
 
@@ -129,3 +129,46 @@ hallucinate a number**.
 - **Cold starts:** the free tier sleeps after ~15 minutes idle. The frontend pings
   `/health` first and shows a "waking the server" state with a timer instead
   of a blank page.
+
+## D11: AI summary on top of the rule-based facts
+
+- **What:** `GET /api/ai-summary` sends this view's pre-formatted facts (KPIs,
+  monthly revenue, the outlet / order-type / channel / category mix, and the 8
+  D8 insights) to Claude, which returns `{headline, points[], actions[]}`.
+- **Guardrails against made-up numbers:**
+  - The model never sees raw rows.
+  - Every number arrives already formatted, and the prompt says to copy
+    numbers, not compute them.
+  - Structured outputs (a JSON schema) fix the shape of the reply.
+  - The UI labels the summary as AI-written and keeps the exact rule-based
+    cards next to it.
+- **Model:** `claude-opus-5-5` at `effort: low`. Rewording a page of facts
+  needs little reasoning, and low effort keeps it to a few seconds.
+  Server-side refusal fallbacks are enabled. A refusal returns an error, never
+  an empty "summary". The model is configurable with `AI_MODEL`.
+- **Cost control for a public URL:**
+  - Called only on click.
+  - Cached per normalised filter set (immutable data, so it never needs
+    regenerating).
+  - A sliding-window cap on uncached calls (`AI_MAX_CALLS_PER_HOUR=30`).
+- **Optional by design:**
+  - Without `ANTHROPIC_API_KEY`, `/api/meta` reports `ai_summary: false` and
+    the button is hidden.
+  - Tests use a fake client, so CI needs no secret.
+- **Rejected:** letting the model query the data itself (text-to-SQL or tools).
+  It's useful for open questions, but for a summary it only adds ways to be
+  wrong.
+
+## D12: No authentication (deliberate)
+
+- The deliverable is a public, read-only demo with one brand's sample data.
+  A login wall would block reviewers and protect nothing.
+- Auth only matters together with authorisation (a manager sees only their
+  outlets). The plan:
+  - an OIDC provider on the frontend;
+  - JWT verification (JWKS) in a FastAPI dependency;
+  - intersecting an `outlets` claim with the requested filter inside
+    `FilterParser`, so every query is tenant-scoped through the existing
+    `Filters` path;
+  - the user in cache keys and per-user rate limits.
+- The details are in the README ("Why no authentication").
