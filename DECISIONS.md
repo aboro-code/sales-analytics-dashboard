@@ -117,8 +117,14 @@ hallucinate a number**.
   Dockerfile runs the ETL in a build stage (pandas + openpyxl) and ships only
   FastAPI, DuckDB and the 6 MB database (image ~340 MB). A failed validation fails
   the deploy.
-- **Frontend on Vercel** with `VITE_API_URL`.
-- **CORS:** an origin regex admits the production URL and Vercel preview URLs,
+- **Frontend on Vercel.** `vercel.json` rewrites `/api/*` and `/health` to the
+  Render API, so the browser only ever talks to its own origin. The first
+  version called Render directly (cross-origin, `VITE_API_URL`). It worked in
+  Chrome but failed in Brave: Shields drops cross-site requests that match
+  tracker filter lists, and the API host contains "analytics". The same-origin
+  proxy fixes this, and also removes CORS preflights. The cost is one extra hop
+  through Vercel's edge (a few ms).
+- **CORS** (kept for direct cross-origin use and local dev against Render): an origin regex admits the production URL and Vercel preview URLs,
   so there's no chicken-and-egg ordering between the two deploys.
 - **Cold starts:** the free tier sleeps after ~15 minutes idle. The frontend pings
   `/health` first and shows a "waking the server" state with a timer instead

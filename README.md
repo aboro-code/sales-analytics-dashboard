@@ -138,7 +138,7 @@ docker run -p 8000:8000 sales-api
 
 | Env var | Where | Default | Purpose |
 |---|---|---|---|
-| `VITE_API_URL` | frontend (build time) | empty (dev proxy) | Base URL of the API |
+| `VITE_API_URL` | frontend (build time) | empty (same-origin `/api`: Vite proxy in dev, Vercel rewrite in prod) | Optional base URL to call the API cross-origin |
 | `ALLOWED_ORIGINS` | API | `http://localhost:5173,...` | Exact CORS origins |
 | `ALLOWED_ORIGIN_REGEX` | API | none | CORS origin pattern (Vercel prod + previews) |
 | `SALES_DB_PATH` | API | `data/sales.duckdb` | Database location |

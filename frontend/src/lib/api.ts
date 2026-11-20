@@ -1,7 +1,13 @@
 import type { Filters } from './filters'
 import { filtersToParams } from './filters'
 
-/** Base URL of the API. Empty in dev (Vite proxies /api); set VITE_API_URL in production. */
+/**
+ * Base URL of the API. Empty by default: calls go to same-origin /api, which
+ * Vite proxies in dev and Vercel rewrites to the API in production (see
+ * vercel.json). Same-origin requests avoid CORS preflights and are not blocked
+ * by privacy shields (e.g. Brave) that drop cross-site "analytics" requests.
+ * Set VITE_API_URL only to call an API on another origin directly.
+ */
 export const API_URL = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '')
 
 // ---------------------------------------------------------------- types
