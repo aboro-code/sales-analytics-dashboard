@@ -1,12 +1,16 @@
 """
-Optional AI summary: Claude rewrites facts we already computed into a short
-manager-style brief.
+Optional AI summary: an LLM rewrites facts we already computed into a short
+manager-style brief. Two interchangeable providers:
+
+* ``groq``      - free tier, open-weights model (default: openai/gpt-oss-120b).
+                  This is what the live demo uses.
+* ``anthropic`` - Claude (default: claude-opus-5-5).
 
 Design rules (see DECISIONS.md, D11):
 * The model never computes anything. It gets the SQL-derived KPIs, breakdowns
   and rule-based insights as JSON and is told to use only numbers that appear
   there, already formatted.
-* It is off unless ANTHROPIC_API_KEY is set. The frontend hides the button when
+* It is off unless a provider key is set. The frontend hides the button when
   /api/meta reports `ai_summary: false`, so the dashboard never depends on it.
 * Responses are cached per filter combination (the data is immutable), and
   uncached calls are rate-limited, so a public demo can't run up a bill.
@@ -18,6 +22,8 @@ import logging
 import os
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import deque
 from typing import Any
 
@@ -28,7 +34,9 @@ from .filters import Filters
 
 log = logging.getLogger("api.ai")
 
-MODEL = os.environ.get("AI_MODEL", "claude-opus-5-5")
+DEFAULT_MODELS = {"anthropic": "claude-opus-5-5", "groq": "openai/gpt-oss-120b"}
+KEY_VARS = {"anthropic": "ANTHROPIC_API_KEY", "groq": "GROQ_API_KEY"}
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MAX_CALLS_PER_HOUR = int(os.environ.get("AI_MAX_CALLS_PER_HOUR", 30))
 
 SYSTEM = """You are a business analyst writing a brief for the owner of a restaurant brand \
@@ -64,8 +72,23 @@ class AIUnavailable(Exception):
         self.status = status
 
 
+def provider() -> str | None:
+    """AI_PROVIDER if set, else whichever key is present (Groq first: it's free)."""
+    chosen = os.environ.get("AI_PROVIDER", "").strip().lower()
+    if chosen:
+        return chosen if chosen in KEY_VARS and os.environ.get(KEY_VARS[chosen]) else None
+    for name in ("groq", "anthropic"):
+        if os.environ.get(KEY_VARS[name]):
+            return name
+    return None
+
+
+def model_for(name: str) -> str:
+    return os.environ.get("AI_MODEL") or DEFAULT_MODELS[name]
+
+
 def enabled() -> bool:
-    return bool(os.environ.get("ANTHROPIC_API_KEY"))
+    return provider() is not None
 
 
 class _RateLimiter:
@@ -140,24 +163,47 @@ def facts(db: Database, f: Filters) -> dict[str, Any]:
 
 
 def summarize(db: Database, f: Filters) -> dict[str, Any]:
-    if not enabled():
+    name = provider()
+    if name is None:
         raise AIUnavailable("AI summary is not configured on this server.")
     data = facts(db, f)
     if not _limiter.acquire():
         raise AIUnavailable("AI summary rate limit reached; try again later.", status=429)
 
+    user = "Facts (JSON):\n" + json.dumps(data, ensure_ascii=False)
+    t0 = time.perf_counter()
+    text, model, usage = (_call_groq if name == "groq" else _call_anthropic)(user)
+    try:
+        brief = json.loads(text)
+        assert isinstance(brief.get("headline"), str) and brief["headline"].strip()
+        assert all(isinstance(brief.get(k), list) for k in ("points", "actions"))
+    except (json.JSONDecodeError, AssertionError, AttributeError):
+        log.error("AI summary: malformed output from %s", model)
+        raise AIUnavailable("The AI summary came back malformed; try again.", status=502)
+
+    return {
+        "headline": brief["headline"],
+        "points": [str(p) for p in brief["points"]],
+        "actions": [str(a) for a in brief["actions"]],
+        "model": model,
+        "provider": name,
+        "generated_ms": round((time.perf_counter() - t0) * 1000),
+        "usage": usage,
+    }
+
+
+def _call_anthropic(user: str) -> tuple[str, str, dict[str, int]]:
     import anthropic
 
-    t0 = time.perf_counter()
     try:
         response = _get_client().beta.messages.create(
-            model=MODEL,
+            model=model_for("anthropic"),
             max_tokens=4000,
             betas=["server-side-fallback-2026-07-01"],
             fallbacks="default",
             output_config={"effort": "low", "format": {"type": "json_schema", "schema": SCHEMA}},
             system=SYSTEM,
-            messages=[{"role": "user", "content": "Facts (JSON):\n" + json.dumps(data, ensure_ascii=False)}],
+            messages=[{"role": "user", "content": user}],
         )
     except anthropic.AuthenticationError:
         log.error("AI summary: invalid ANTHROPIC_API_KEY")
@@ -173,15 +219,46 @@ def summarize(db: Database, f: Filters) -> dict[str, Any]:
     if response.stop_reason == "refusal":
         raise AIUnavailable("The model declined to summarise this selection.", status=502)
     text = next((b.text for b in response.content if b.type == "text"), "")
-    try:
-        brief = json.loads(text)
-    except json.JSONDecodeError:
-        log.error("AI summary: unparseable output (stop_reason=%s)", response.stop_reason)
-        raise AIUnavailable("The AI summary came back malformed; try again.", status=502)
+    usage = {"input_tokens": response.usage.input_tokens, "output_tokens": response.usage.output_tokens}
+    return text, response.model, usage
 
-    return {
-        **brief,
-        "model": response.model,
-        "generated_ms": round((time.perf_counter() - t0) * 1000),
-        "usage": {"input_tokens": response.usage.input_tokens, "output_tokens": response.usage.output_tokens},
+
+def _post_json(url: str, body: dict[str, Any], headers: dict[str, str], timeout: float = 60) -> dict[str, Any]:
+    """Tiny stdlib HTTP client: one POST per summary doesn't justify another dependency."""
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST", headers={
+        "Content-Type": "application/json", "User-Agent": "sales-analytics-dashboard/1.0", **headers})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def _call_groq(user: str) -> tuple[str, str, dict[str, int]]:
+    body = {
+        "model": model_for("groq"),
+        "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}],
+        # Strict mode = constrained decoding, so the reply always matches SCHEMA.
+        "response_format": {"type": "json_schema",
+                            "json_schema": {"name": "brief", "strict": True, "schema": SCHEMA}},
+        "reasoning_effort": "low",
+        "include_reasoning": False,
+        "temperature": 0.3,
+        "max_completion_tokens": 2000,
     }
+    try:
+        res = _post_json(GROQ_URL, body, {"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}"})
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:300]
+        log.error("AI summary: Groq HTTP %s %s", e.code, detail)
+        if e.code in (401, 403):
+            raise AIUnavailable("AI summary is misconfigured on this server.")
+        if e.code == 429:
+            raise AIUnavailable("The free AI quota is busy; try again in a minute.", status=429)
+        raise AIUnavailable("The AI provider returned an error.", status=502)
+    except (urllib.error.URLError, TimeoutError):
+        raise AIUnavailable("Could not reach the AI provider.", status=502)
+
+    choice = res["choices"][0]
+    if choice.get("finish_reason") == "length":
+        raise AIUnavailable("The AI summary was cut off; try again.", status=502)
+    u = res.get("usage") or {}
+    usage = {"input_tokens": u.get("prompt_tokens", 0), "output_tokens": u.get("completion_tokens", 0)}
+    return choice["message"].get("content") or "", res.get("model", body["model"]), usage

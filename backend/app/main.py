@@ -153,8 +153,8 @@ def create_app(db_path: str | None = None, *, warm_cache: bool | None = None) ->
 
     @app.get("/api/ai-summary", tags=["data"])
     def ai_summary(f: FilterDep, response: Response):
-        """Optional: Claude rewrites the computed facts for these filters into a short
-        brief. Needs ANTHROPIC_API_KEY; cached per filter set and rate-limited."""
+        """Optional: an LLM (Groq or Claude) rewrites the computed facts for these filters into a short
+        brief. Needs GROQ_API_KEY or ANTHROPIC_API_KEY; cached per filter set and rate-limited."""
         key = ("ai", f.key())
         hit, value = cache.get(key)
         if not hit:

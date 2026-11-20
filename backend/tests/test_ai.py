@@ -27,6 +27,8 @@ BRIEF = {"headline": "Koramangala leads.", "points": ["a", "b", "c"], "actions":
 @pytest.fixture
 def fake(monkeypatch):
     msgs = FakeMessages(BRIEF)
+    for var in ("GROQ_API_KEY", "AI_PROVIDER", "AI_MODEL"):
+        monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(ai, "_get_client", lambda: SimpleNamespace(beta=SimpleNamespace(messages=msgs)))
     monkeypatch.setattr(ai, "_limiter", ai._RateLimiter(100))
@@ -34,7 +36,8 @@ def fake(monkeypatch):
 
 
 def test_disabled_without_key(client, monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    for var in ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "AI_PROVIDER"):
+        monkeypatch.delenv(var, raising=False)
     assert client.get("/api/meta").json()["ai_summary"] is False
     r = client.get("/api/ai-summary", params={"outlets": "MG Road"})
     assert r.status_code == 503
@@ -80,3 +83,53 @@ def test_empty_selection(client, fake):
     r = client.get("/api/ai-summary", params={"start": "2030-01-01", "end": "2030-01-31"})
     assert r.status_code == 422
     assert fake.calls == []
+
+
+# ------------------------------------------------------------------ Groq provider
+@pytest.fixture
+def groq(monkeypatch):
+    calls = []
+
+    def fake_post(url, body, headers, timeout=60):
+        calls.append({"url": url, "body": body, "headers": headers})
+        return {"model": body["model"], "usage": {"prompt_tokens": 900, "completion_tokens": 120},
+                "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(BRIEF)}}]}
+
+    for var in ("ANTHROPIC_API_KEY", "AI_PROVIDER", "AI_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
+    monkeypatch.setattr(ai, "_post_json", fake_post)
+    monkeypatch.setattr(ai, "_limiter", ai._RateLimiter(100))
+    return calls
+
+
+def test_groq_provider(client, groq):
+    assert ai.provider() == "groq"
+    r = client.get("/api/ai-summary", params={"order_types": "Takeaway"})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["provider"] == "groq" and d["model"] == "openai/gpt-oss-120b" and d["headline"] == BRIEF["headline"]
+    body = groq[0]["body"]
+    assert groq[0]["headers"]["Authorization"] == "Bearer gsk-test"
+    assert body["response_format"]["json_schema"]["strict"] is True
+    assert body["messages"][0]["role"] == "system"
+
+
+def test_provider_selection(monkeypatch):
+    for var in ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "AI_PROVIDER"):
+        monkeypatch.delenv(var, raising=False)
+    assert ai.provider() is None
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "a")
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    assert ai.provider() == "groq"  # free one wins by default
+    monkeypatch.setenv("AI_PROVIDER", "anthropic")
+    assert ai.provider() == "anthropic"
+    monkeypatch.setenv("AI_PROVIDER", "nonsense")
+    assert ai.provider() is None
+
+
+def test_groq_malformed_output_is_an_error(client, groq, monkeypatch):
+    monkeypatch.setattr(ai, "_post_json", lambda *a, **k: {
+        "choices": [{"finish_reason": "stop", "message": {"content": "not json"}}]})
+    r = client.get("/api/ai-summary", params={"order_types": "Dine-In"})
+    assert r.status_code == 502
