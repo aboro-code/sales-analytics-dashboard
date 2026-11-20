@@ -10,11 +10,12 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime
 from typing import Annotated, Any, Callable, Literal
 
-from fastapi import Depends, FastAPI, Query, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import StreamingResponse
 
+from . import ai
 from . import insights as insights_mod
 from . import queries
 from .cache import TTLCache
@@ -116,7 +117,7 @@ def create_app(db_path: str | None = None, *, warm_cache: bool | None = None) ->
     def meta(response: Response):
         """Filter options and dataset bounds."""
         response.headers["Cache-Control"] = CACHE_CONTROL
-        return meta_cache
+        return {**meta_cache, "ai_summary": ai.enabled()}
 
     @app.get("/api/summary", tags=["data"])
     def summary(f: FilterDep, response: Response):
@@ -149,6 +150,22 @@ def create_app(db_path: str | None = None, *, warm_cache: bool | None = None) ->
     def insights(f: FilterDep, response: Response):
         """Rule-based, plain-English insights for the current filters."""
         return cached(response, ("insights", f.key()), lambda: {"insights": insights_mod.generate(db, f)})
+
+    @app.get("/api/ai-summary", tags=["data"])
+    def ai_summary(f: FilterDep, response: Response):
+        """Optional: Claude rewrites the computed facts for these filters into a short
+        brief. Needs ANTHROPIC_API_KEY; cached per filter set and rate-limited."""
+        key = ("ai", f.key())
+        hit, value = cache.get(key)
+        if not hit:
+            try:
+                value = ai.summarize(db, f)
+            except ai.AIUnavailable as e:
+                raise HTTPException(status_code=e.status, detail=str(e))
+            cache.set(key, value)
+        response.headers["X-Cache"] = "HIT" if hit else "MISS"
+        response.headers["Cache-Control"] = CACHE_CONTROL
+        return value
 
     @app.get("/api/records", tags=["data"])
     def records(

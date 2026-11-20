@@ -22,3 +22,8 @@ services:
         value: 256MB
       - key: CACHE_TTL_SECONDS
         value: "3600"
+      # Optional: enables the AI summary. Set it in the Render dashboard (never commit it).
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: AI_MAX_CALLS_PER_HOUR
+        value: "30"
