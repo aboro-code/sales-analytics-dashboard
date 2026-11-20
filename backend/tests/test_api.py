@@ -34,7 +34,7 @@ def test_summary_unfiltered(client):
     assert s["revenue"] == TOTAL_REVENUE
     assert s["aov"] == TOTAL_REVENUE / TOTAL_ORDERS
     assert s["items_sold"] == TOTAL_QTY
-    assert s["free_items"] == 1
+    assert s["free_items"] == 1 and s["free_lines"] == 1
     assert s["top_outlet"]["name"] == "MG Road"  # 460 vs 350
 
 

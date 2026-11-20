@@ -44,7 +44,10 @@ export interface Summary {
   aov: number
   items_sold: number
   avg_items_per_order: number
+  /** Units handed out at ₹0 (sum of quantity). */
   free_items: number
+  /** Number of ₹0 rows. */
+  free_lines: number
   active_days: number
   avg_daily_revenue: number
   top_outlet: { name: string | null; revenue: number } | null

@@ -188,7 +188,7 @@ def generate(db: Database, f: Filters) -> list[dict[str, Any]]:
         with_dip = db.scalar(f"SELECT COUNT(DISTINCT bill_no) FROM line_items {cond} price = 0", p) or 0
         out.append(_insight(
             "free_dips", "Free add-ons",
-            f"{s['free_items']:,} complimentary dips were handed out (₹0 lines) across {_pct(with_dip / s['orders'])} of orders. "
+            f"{s['free_items']:,} complimentary dips were handed out (on {s['free_lines']:,} ₹0 lines) across {_pct(with_dip / s['orders'])} of orders. "
             f"Even a ₹10 charge would have added {_inr(s['free_items'] * 10)}.",
             value=s["free_items"],
         ))

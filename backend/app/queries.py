@@ -74,7 +74,8 @@ def summary(db: Database, f: Filters) -> dict[str, Any]:
     lines = db.one(
         f"""SELECT COUNT(*) AS records, COALESCE(SUM(quantity),0) AS items_sold,
                    COALESCE(SUM(revenue),0) AS revenue,
-                   SUM(CASE WHEN price = 0 THEN quantity ELSE 0 END) AS free_items
+                   SUM(CASE WHEN price = 0 THEN quantity ELSE 0 END) AS free_items,
+                   COUNT(*) FILTER (WHERE price = 0) AS free_lines
             FROM line_items {lw}""",
         lp,
     )
@@ -102,7 +103,8 @@ def summary(db: Database, f: Filters) -> dict[str, Any]:
         "aov": _r(rev / n) if n else 0,
         "items_sold": lines["items_sold"],
         "avg_items_per_order": _r(orders["items"] / n) if n else 0,
-        "free_items": lines["free_items"] or 0,
+        "free_items": lines["free_items"] or 0,  # units handed out at ₹0 (quantity)
+        "free_lines": lines["free_lines"] or 0,  # ₹0 rows
         "active_days": orders["days"],
         "avg_daily_revenue": _r(rev / orders["days"]) if orders["days"] else 0,
         "top_outlet": {"name": top_outlet.get("name"), "revenue": _r(top_outlet.get("revenue"))} if top_outlet else None,

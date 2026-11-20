@@ -20,6 +20,9 @@ def test_free_items_are_dips(real_client):
     rows = real_client.get("/api/records", params=params).json()["rows"]
     zero = [r for r in rows if r["price"] == 0]
     assert zero and all(r["item"].startswith("Dip - ") for r in zero)
+    s = real_client.get("/api/summary").json()
+    # 8,611 ₹0 rows carrying 12,543 units: rows and quantities must not be mixed up.
+    assert (s["free_lines"], s["free_items"]) == (8_611, 12_543)
 
 
 def test_group_filter_partitions_revenue(real_client):

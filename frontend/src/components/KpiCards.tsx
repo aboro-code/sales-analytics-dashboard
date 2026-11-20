@@ -10,7 +10,7 @@ function tiles(s: Summary): Tile[] {
     { label: 'Orders', value: formatNum(s.orders), hint: `${formatNum(s.active_days)} trading days`, title: formatNum(s.orders) },
     { label: 'Avg order value', value: formatINR2(s.aov), hint: 'revenue ÷ orders' },
     { label: 'Items sold', value: formatNum(s.items_sold), hint: `${s.avg_items_per_order.toFixed(2)} per order`, title: formatNum(s.items_sold) },
-    { label: 'Line items', value: formatNum(s.total_records), hint: `${formatNum(s.free_items)} free dips incl.`, title: `${formatNum(s.total_records)} records` },
+    { label: 'Line items', value: formatNum(s.total_records), hint: `${formatNum(s.free_lines)} free-dip lines incl.`, title: `${formatNum(s.total_records)} records` },
     { label: 'Top outlet', value: s.top_outlet?.name ?? '–', hint: s.top_outlet ? formatINRShort(s.top_outlet.revenue) : '' },
     { label: 'Top item', value: s.top_item?.name ?? '–', hint: s.top_item ? `${formatINRShort(s.top_item.revenue)} · ${formatNum(s.top_item.quantity)} sold` : '' },
   ]
