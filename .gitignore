@@ -9,8 +9,11 @@ node_modules/
 dist/
 *.local
 
-# Data: raw xlsx is committed (13 MB); the SQLite DB is a build artifact
+# Data: raw xlsx is committed (13 MB); the built DuckDB file is a build artifact
 data/*.db
+data/*.duckdb
+data/*.tmp
+data/*.wal
 data/*.db-*
 
 # Local-only material (assignment brief, tool logs)

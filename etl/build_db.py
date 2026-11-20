@@ -1,11 +1,12 @@
 """
-ETL: data/data.xlsx  ->  data/sales.db (SQLite)
+ETL: data/data.xlsx  ->  data/sales.duckdb (DuckDB)
 
 Reads the raw Excel export once, validates it, normalises it and writes a
-read-optimised SQLite database that the API serves from.
+read-optimised, embedded DuckDB database file that the API serves from
+(read-only). See DECISIONS.md (D4) for why DuckDB rather than SQLite.
 
     python etl/build_db.py                       # defaults
-    python etl/build_db.py --src data/data.xlsx --out data/sales.db --report etl/REPORT.md
+    python etl/build_db.py --src data/data.xlsx --out data/sales.duckdb --report etl/REPORT.md
 
 The script fails (non-zero exit) if any *hard* validation check fails, so a bad
 file can never be deployed silently. *Soft* findings (e.g. Price = 0 rows) are
@@ -15,13 +16,13 @@ from __future__ import annotations
 
 import argparse
 import os
-import sqlite3
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+import duckdb
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -169,7 +170,7 @@ def transform(raw: pd.DataFrame, rep: Report) -> tuple[pd.DataFrame, pd.DataFram
     df["month"] = ts.dt.strftime("%Y-%m")
     df["hour"] = ts.dt.hour.astype("int64")
     df["weekday"] = ts.dt.day_of_week.astype("int64")  # 0 = Monday
-    df["order_ts"] = ts.dt.strftime("%Y-%m-%d %H:%M:%S")  # ISO text sorts correctly in SQLite
+    df["order_ts"] = ts.dt.strftime("%Y-%m-%d %H:%M:%S")  # cast to TIMESTAMP on load
 
     # ---- Orders (one row per bill) --------------------------------------- #
     orders = (
@@ -218,90 +219,67 @@ def transform(raw: pd.DataFrame, rep: Report) -> tuple[pd.DataFrame, pd.DataFram
 # --------------------------------------------------------------------------- #
 # Load
 # --------------------------------------------------------------------------- #
-LINE_COLS = [
-    "bill_no", "outlet", "order_ts", "order_date", "week", "month", "hour", "weekday",
-    "item_group", "item", "price", "quantity", "revenue", "order_type", "settlement", "brand",
-]
-
-SCHEMA = """
-CREATE TABLE line_items (
-    id          INTEGER PRIMARY KEY,
-    bill_no     INTEGER NOT NULL,
-    outlet      TEXT    NOT NULL,
-    order_ts    TEXT    NOT NULL,   -- 'YYYY-MM-DD HH:MM:SS'
-    order_date  TEXT    NOT NULL,   -- 'YYYY-MM-DD'
-    week        TEXT    NOT NULL,   -- Monday of the ISO week, 'YYYY-MM-DD'
-    month       TEXT    NOT NULL,   -- 'YYYY-MM'
-    hour        INTEGER NOT NULL,
-    weekday     INTEGER NOT NULL,   -- 0 = Monday
-    item_group  TEXT    NOT NULL,
-    item        TEXT    NOT NULL,
-    price       REAL    NOT NULL,
-    quantity    INTEGER NOT NULL,
-    revenue     REAL    NOT NULL,   -- price * quantity
-    order_type  TEXT    NOT NULL,
-    settlement  TEXT    NOT NULL,
-    brand       TEXT    NOT NULL
-);
-
-CREATE TABLE orders (
-    bill_no     INTEGER PRIMARY KEY,
-    outlet      TEXT    NOT NULL,
-    order_type  TEXT    NOT NULL,
-    settlement  TEXT    NOT NULL,
-    order_ts    TEXT    NOT NULL,
-    order_date  TEXT    NOT NULL,
-    week        TEXT    NOT NULL,
-    month       TEXT    NOT NULL,
-    hour        INTEGER NOT NULL,
-    weekday     INTEGER NOT NULL,
-    line_count  INTEGER NOT NULL,
-    item_count  INTEGER NOT NULL,   -- total quantity on the bill
-    order_value REAL    NOT NULL
-);
-
-CREATE TABLE build_info (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+# Tables are created with explicit types. Rows are physically ordered by
+# timestamp: DuckDB keeps min/max "zone maps" per row group, so a date-range
+# filter skips whole row groups without needing a secondary index. (DuckDB's
+# ART indexes help point lookups, not these analytical scans, so none are created.)
+LINE_ITEMS_SQL = """
+CREATE TABLE line_items AS
+SELECT
+    CAST(row_number() OVER (ORDER BY order_ts, bill_no) AS INTEGER) AS id,
+    CAST(bill_no AS INTEGER)       AS bill_no,
+    outlet,
+    CAST(order_ts AS TIMESTAMP)    AS order_ts,
+    CAST(order_date AS DATE)       AS order_date,
+    CAST(week AS DATE)             AS week,        -- Monday of the ISO week
+    month,                                          -- 'YYYY-MM'
+    CAST(hour AS TINYINT)          AS hour,
+    CAST(weekday AS TINYINT)       AS weekday,     -- 0 = Monday
+    item_group,
+    item,
+    CAST(price AS DOUBLE)          AS price,
+    CAST(quantity AS INTEGER)      AS quantity,
+    CAST(revenue AS DOUBLE)        AS revenue,     -- price * quantity
+    order_type,
+    settlement,
+    brand
+FROM df_lines
+ORDER BY order_ts, bill_no
 """
 
-# Indexes are chosen for the API's access paths:
-#  * date range is applied on almost every request -> order_date leads.
-#  * outlet is the most common categorical filter.
-#  * bill_no on line_items supports "orders containing item X" (EXISTS / IN).
-#  * (order_ts, id) supports the paginated records table's default sort.
-INDEXES = """
-CREATE INDEX ix_li_date        ON line_items(order_date);
-CREATE INDEX ix_li_outlet_date ON line_items(outlet, order_date);
-CREATE INDEX ix_li_group       ON line_items(item_group);
-CREATE INDEX ix_li_item        ON line_items(item);
-CREATE INDEX ix_li_bill        ON line_items(bill_no);
-CREATE INDEX ix_li_ts          ON line_items(order_ts, id);
-CREATE INDEX ix_o_date         ON orders(order_date);
-CREATE INDEX ix_o_outlet_date  ON orders(outlet, order_date);
+ORDERS_SQL = """
+CREATE TABLE orders AS
+SELECT
+    CAST(bill_no AS INTEGER)       AS bill_no,
+    outlet, order_type, settlement,
+    CAST(order_ts AS TIMESTAMP)    AS order_ts,
+    CAST(order_date AS DATE)       AS order_date,
+    CAST(week AS DATE)             AS week,
+    month,
+    CAST(hour AS TINYINT)          AS hour,
+    CAST(weekday AS TINYINT)       AS weekday,
+    CAST(line_count AS INTEGER)    AS line_count,
+    CAST(item_count AS INTEGER)    AS item_count,  -- total quantity on the bill
+    CAST(order_value AS DOUBLE)    AS order_value
+FROM df_orders
+ORDER BY order_ts, bill_no
 """
 
 
 def load(df: pd.DataFrame, orders: pd.DataFrame, out: Path, rep: Report, src: Path) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_suffix(out.suffix + ".tmp")
-    if tmp.exists():
-        tmp.unlink()
+    tmp = out.with_name(out.name + ".tmp")
+    tmp.unlink(missing_ok=True)
 
-    con = sqlite3.connect(tmp)
+    con = duckdb.connect(str(tmp))
     try:
-        con.executescript("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;")
-        con.executescript(SCHEMA)
-        # Insert in timestamp order so the physical layout matches the common sort.
-        df = df.sort_values(["order_ts", "bill_no"], kind="stable")
-        con.executemany(
-            f"INSERT INTO line_items ({','.join(LINE_COLS)}) VALUES ({','.join('?' * len(LINE_COLS))})",
-            df[LINE_COLS].itertuples(index=False, name=None),
-        )
-        ocols = list(orders.columns)
-        con.executemany(
-            f"INSERT INTO orders ({','.join(ocols)}) VALUES ({','.join('?' * len(ocols))})",
-            orders.itertuples(index=False, name=None),
-        )
-        con.executescript(INDEXES)
+        con.register("df_lines", df)
+        con.register("df_orders", orders)
+        con.execute(LINE_ITEMS_SQL)
+        con.execute(ORDERS_SQL)
+        con.unregister("df_lines")
+        con.unregister("df_orders")
+
         p = rep.profile
         info = {
             "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -310,9 +288,10 @@ def load(df: pd.DataFrame, orders: pd.DataFrame, out: Path, rep: Report, src: Pa
             "bills": str(p["bills"]),
             "total_revenue": f"{p['total_revenue']:.2f}",
             "brand": ", ".join(p["brands"].keys()),
+            "engine": f"duckdb {duckdb.__version__}",
         }
-        con.executemany("INSERT INTO build_info VALUES (?, ?)", info.items())
-        con.commit()
+        con.execute("CREATE TABLE build_info (key VARCHAR PRIMARY KEY, value VARCHAR NOT NULL)")
+        con.executemany("INSERT INTO build_info VALUES (?, ?)", list(info.items()))
 
         # Post-load reconciliation: what's in the DB must match what we computed.
         db_rows, db_rev = con.execute("SELECT COUNT(*), SUM(revenue) FROM line_items").fetchone()
@@ -324,13 +303,11 @@ def load(df: pd.DataFrame, orders: pd.DataFrame, out: Path, rep: Report, src: Pa
             abs(db_rev - p["total_revenue"]) < 0.01 and abs(db_ov - p["total_revenue"]) < 0.01,
             f"line_items ₹{db_rev:,.0f} = orders ₹{db_ov:,.0f}",
         )
-
-        con.execute("ANALYZE")  # give the query planner real statistics
-        con.commit()
-        con.execute("VACUUM")
+        con.execute("CHECKPOINT")
     finally:
         con.close()
 
+    out.with_name(out.name + ".wal").unlink(missing_ok=True)
     os.replace(tmp, out)  # atomic swap: the API never sees a half-built DB
 
 
@@ -399,7 +376,7 @@ def write_report(rep: Report, path: Path, db_path: Path) -> None:
     for k, v in rep.timings.items():
         w(f"| {k} | {v:.1f} |")
     if db_path.exists():
-        w(f"| _SQLite file size_ | {db_path.stat().st_size / 1e6:.1f} MB |")
+        w(f"| _DuckDB file size_ | {db_path.stat().st_size / 1e6:.1f} MB |")
     w("")
     path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -408,7 +385,7 @@ def write_report(rep: Report, path: Path, db_path: Path) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--src", type=Path, default=ROOT / "data" / "data.xlsx")
-    ap.add_argument("--out", type=Path, default=ROOT / "data" / "sales.db")
+    ap.add_argument("--out", type=Path, default=ROOT / "data" / "sales.duckdb")
     ap.add_argument("--report", type=Path, default=ROOT / "etl" / "REPORT.md", help="write markdown report here ('' to skip)")
     args = ap.parse_args()
 
@@ -431,7 +408,7 @@ def main() -> int:
     t2 = time.perf_counter()
     print(f"Loading {args.out} …")
     load(df, orders, args.out, rep, args.src)
-    rep.timings["load + index (SQLite)"] = time.perf_counter() - t2
+    rep.timings["load (DuckDB)"] = time.perf_counter() - t2
     rep.timings["total"] = time.perf_counter() - t0
 
     if rep.failed:

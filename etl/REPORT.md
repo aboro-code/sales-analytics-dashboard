@@ -97,8 +97,8 @@ Aggregator settlements (ZomatoPay, SwiggyPay) only ever appear on Delivery; Dine
 
 | Stage | Seconds |
 |---|---:|
-| extract (read xlsx) | 39.6 |
-| transform + validate | 4.6 |
-| load + index (SQLite) | 9.2 |
-| total | 53.4 |
-| _SQLite file size_ | 100.8 MB |
+| extract (read xlsx) | 21.1 |
+| transform + validate | 2.4 |
+| load (DuckDB) | 0.6 |
+| total | 24.1 |
+| _DuckDB file size_ | 6.0 MB |

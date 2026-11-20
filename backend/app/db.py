@@ -1,62 +1,79 @@
-"""SQLite access: one read-only connection per worker thread."""
+"""DuckDB access: one read-only database, one cursor per worker thread."""
 from __future__ import annotations
 
 import os
-import sqlite3
 import threading
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, Sequence
 
-DEFAULT_DB = Path(__file__).resolve().parents[2] / "data" / "sales.db"
+import duckdb
+
+DEFAULT_DB = Path(__file__).resolve().parents[2] / "data" / "sales.duckdb"
+
+
+def _jsonable(v: Any) -> Any:
+    if isinstance(v, datetime):
+        return v.isoformat(sep=" ")
+    if isinstance(v, date):
+        return v.isoformat()
+    return v
 
 
 class Database:
     """
-    Opens the SQLite file read-only and immutable.
+    Opens the DuckDB file **read-only**: the API cannot modify data even if a
+    query were malformed, and multiple processes may open the same file.
 
-    * ``mode=ro`` - the API can never write, even if a query were malformed.
-    * ``immutable=1`` - SQLite skips file locking and change detection, which is
-      safe because the file is only ever replaced by a fresh ETL build + restart.
-    * Connections are per-thread because FastAPI runs sync endpoints in a
-      threadpool and sqlite3 connections must not be shared across threads.
+    FastAPI runs sync endpoints in a threadpool. A DuckDB connection must not be
+    used concurrently from several threads, so each thread gets its own cursor
+    (``con.cursor()`` is a cheap duplicate of the parent connection sharing the
+    same database instance and buffer pool).
     """
 
     def __init__(self, path: str | os.PathLike[str] | None = None) -> None:
         self.path = Path(path or os.environ.get("SALES_DB_PATH") or DEFAULT_DB).resolve()
         if not self.path.exists():
             raise FileNotFoundError(
-                f"SQLite database not found at {self.path}. Run `python etl/build_db.py` first."
+                f"Database not found at {self.path}. Run `python etl/build_db.py` first."
             )
+        config = {
+            # Keep within a 512 MB free-tier instance; the whole DB is ~6 MB anyway.
+            "memory_limit": os.environ.get("DUCKDB_MEMORY_LIMIT", "256MB"),
+        }
+        if threads := os.environ.get("DUCKDB_THREADS"):
+            config["threads"] = int(threads)
+        self._root = duckdb.connect(str(self.path), read_only=True, config=config)
         self._local = threading.local()
 
-    def _connect(self) -> sqlite3.Connection:
-        uri = f"{self.path.as_uri()}?mode=ro&immutable=1"
-        con = sqlite3.connect(uri, uri=True, check_same_thread=False)
-        con.row_factory = sqlite3.Row
-        con.execute("PRAGMA query_only = ON")
-        con.execute("PRAGMA mmap_size = 268435456")  # 256 MB memory-mapped reads
-        con.execute("PRAGMA cache_size = -32000")    # ~32 MB page cache per connection
-        con.execute("PRAGMA temp_store = MEMORY")
-        return con
-
     @property
-    def con(self) -> sqlite3.Connection:
+    def con(self) -> duckdb.DuckDBPyConnection:
         c = getattr(self._local, "con", None)
         if c is None:
-            c = self._local.con = self._connect()
+            c = self._local.con = self._root.cursor()
         return c
 
-    def all(self, sql: str, params: list[Any] | tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-        return [dict(r) for r in self.con.execute(sql, params).fetchall()]
+    def all(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
+        cur = self.con.execute(sql, list(params))
+        cols = [d[0] for d in cur.description]
+        return [{k: _jsonable(v) for k, v in zip(cols, row)} for row in cur.fetchall()]
 
-    def one(self, sql: str, params: list[Any] | tuple[Any, ...] = ()) -> dict[str, Any]:
-        row = self.con.execute(sql, params).fetchone()
-        return dict(row) if row else {}
+    def one(self, sql: str, params: Sequence[Any] = ()) -> dict[str, Any]:
+        rows = self.all(sql, params)
+        return rows[0] if rows else {}
 
-    def scalar(self, sql: str, params: list[Any] | tuple[Any, ...] = ()) -> Any:
-        row = self.con.execute(sql, params).fetchone()
-        return row[0] if row else None
+    def scalar(self, sql: str, params: Sequence[Any] = ()) -> Any:
+        row = self.con.execute(sql, list(params)).fetchone()
+        return _jsonable(row[0]) if row else None
 
-    def cursor(self, sql: str, params: list[Any] | tuple[Any, ...] = ()) -> sqlite3.Cursor:
-        """A fresh connection-owned cursor, for streaming (export) on the calling thread."""
-        return self.con.execute(sql, params)
+    def stream(self, sql: str, params: Sequence[Any] = (), batch: int = 5000) -> Iterator[tuple[list[str], list[tuple[Any, ...]]]]:
+        """Yield (columns, rows) batches. Uses a dedicated cursor so it is safe to
+        iterate from whichever thread the streaming response runs on."""
+        cur = self._root.cursor()
+        try:
+            cur.execute(sql, list(params))
+            cols = [d[0] for d in cur.description]
+            while chunk := cur.fetchmany(batch):
+                yield cols, chunk
+        finally:
+            cur.close()

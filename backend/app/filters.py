@@ -114,10 +114,10 @@ def where(f: Filters, *, include_line_level: bool = True, alias: str = "") -> tu
     clauses: list[str] = []
     params: list[Any] = []
     if f.start:
-        clauses.append(f"{p}order_date >= ?")
+        clauses.append(f"{p}order_date >= CAST(? AS DATE)")
         params.append(f.start)
     if f.end:
-        clauses.append(f"{p}order_date <= ?")
+        clauses.append(f"{p}order_date <= CAST(? AS DATE)")
         params.append(f.end)
     for name, col in ORDER_LEVEL.items():
         vals = getattr(f, name)
@@ -142,13 +142,17 @@ def orders_cte(f: Filters) -> tuple[str, list[Any]]:
 
     Downstream queries are identical either way - they just read ``o``.
     """
-    cols = "bill_no, outlet, order_type, settlement, order_date, week, month, hour, weekday"
+    bill_cols = ["outlet", "order_type", "settlement", "order_date", "week", "month", "hour", "weekday"]
     if not f.has_line_filters:
         w, params = where(f, include_line_level=False)
-        return f"WITH o AS (SELECT {cols}, item_count, order_value FROM orders {w})", params
+        cols = ", ".join(["bill_no", *bill_cols, "item_count", "order_value"])
+        return f"WITH o AS (SELECT {cols} FROM orders {w})", params
     w, params = where(f)
+    # Bill-level columns are constant within a bill (validated in the ETL), so
+    # any_value() is exact here, not an approximation.
+    picked = ", ".join(f"any_value({c}) AS {c}" for c in bill_cols)
     return (
-        f"WITH o AS (SELECT {cols}, SUM(quantity) AS item_count, SUM(revenue) AS order_value "
+        f"WITH o AS (SELECT bill_no, {picked}, SUM(quantity) AS item_count, SUM(revenue) AS order_value "
         f"FROM line_items {w} GROUP BY bill_no)",
         params,
     )

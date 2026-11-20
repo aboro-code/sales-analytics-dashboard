@@ -189,11 +189,7 @@ def records(db: Database, f: Filters, page: int, page_size: int, sort: str, orde
     }
 
 
-def export_rows(db: Database, f: Filters, batch: int = 5000) -> Iterator[list[tuple[Any, ...]]]:
+def export_rows(db: Database, f: Filters) -> Iterator[tuple[list[str], list[tuple[Any, ...]]]]:
+    """Filtered line items in chronological order, in batches, for CSV streaming."""
     w, p = where(f)
-    cur = db.cursor(f"SELECT {', '.join(RECORD_COLUMNS)} FROM line_items {w} ORDER BY order_ts, id", p)
-    while True:
-        chunk = cur.fetchmany(batch)
-        if not chunk:
-            break
-        yield [tuple(r) for r in chunk]
+    return db.stream(f"SELECT {', '.join(RECORD_COLUMNS)} FROM line_items {w} ORDER BY order_ts, id", p)
