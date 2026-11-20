@@ -162,6 +162,11 @@ def transform(raw: pd.DataFrame, rep: Report) -> tuple[pd.DataFrame, pd.DataFram
         hard=False,
     )
 
+    # Stop before deriving anything if the data is not trustworthy: the caller
+    # reports every failed check at once instead of crashing on the first bad value.
+    if rep.failed:
+        return df, df.iloc[0:0]
+
     # ---- Derived columns -------------------------------------------------- #
     ts = df["order_ts"]
     df["revenue"] = df["price"] * df["quantity"]
