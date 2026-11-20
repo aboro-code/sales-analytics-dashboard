@@ -73,7 +73,7 @@ function AiBrief({ query }: { query: ReturnType<typeof useAiSummary> }) {
   if (!query.data) {
     return (
       <div aria-busy className="mb-3 animate-pulse rounded-lg border border-line bg-surface-2 p-4">
-        <p className="text-[13px] text-ink-3">Claude is reading this view's numbers…</p>
+        <p className="text-[13px] text-ink-3">The model is reading this view's numbers…</p>
         <div className="mt-3 h-3 w-3/4 rounded bg-line" />
         <div className="mt-2 h-3 w-2/3 rounded bg-line" />
       </div>

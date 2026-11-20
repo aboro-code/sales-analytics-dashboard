@@ -30,6 +30,7 @@ export interface AiSummary {
   points: string[]
   actions: string[]
   model: string
+  provider: 'groq' | 'anthropic'
   generated_ms: number
 }
 

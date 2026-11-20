@@ -134,7 +134,7 @@ hallucinate a number**.
 
 - **What:** `GET /api/ai-summary` sends this view's pre-formatted facts (KPIs,
   monthly revenue, the outlet / order-type / channel / category mix, and the 8
-  D8 insights) to Claude, which returns `{headline, points[], actions[]}`.
+  D8 insights) to an LLM, which returns `{headline, points[], actions[]}`.
 - **Guardrails against made-up numbers:**
   - The model never sees raw rows.
   - Every number arrives already formatted, and the prompt says to copy
@@ -142,10 +142,17 @@ hallucinate a number**.
   - Structured outputs (a JSON schema) fix the shape of the reply.
   - The UI labels the summary as AI-written and keeps the exact rule-based
     cards next to it.
-- **Model:** `claude-opus-5-5` at `effort: low`. Rewording a page of facts
-  needs little reasoning, and low effort keeps it to a few seconds.
-  Server-side refusal fallbacks are enabled. A refusal returns an error, never
-  an empty "summary". The model is configurable with `AI_MODEL`.
+- **Provider is a setting (`AI_PROVIDER`):**
+  - **Groq**, with `openai/gpt-oss-120b`, strict JSON schema and low reasoning
+    effort. It's free, so it runs the live demo with no billing account.
+  - **Anthropic**, with `claude-opus-5-5` at low effort and server-side refusal
+    fallbacks.
+  - Rewording a page of facts needs little reasoning. A grounded,
+    schema-constrained task like this is where a free open-weights model is
+    good enough, and the design (pre-formatted facts plus strict schema) is
+    what keeps quality up, not the model choice.
+  - Malformed output, refusals and truncation all return an error, never a
+    broken "summary".
 - **Cost control for a public URL:**
   - Called only on click.
   - Cached per normalised filter set (immutable data, so it never needs

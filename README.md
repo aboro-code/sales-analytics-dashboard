@@ -64,7 +64,8 @@ URL-shareable filters.
 - **Insights panel:** eight plain-English findings computed in SQL for the
   current filters, e.g. *"90.1% of delivery orders come through Zomato or
   Swiggy; only 9.9% are direct"*.
-- **AI summary (optional):** one click asks Claude to turn this view's
+- **AI summary (optional):** one click asks an LLM (Groq's free
+  `gpt-oss-120b` on the live site; Claude also supported) to turn this view's
   computed facts into a short brief for the owner (a headline, 3–4
   observations and 2 next steps). The model gets only pre-formatted numbers
   from SQL and is told to copy them, never compute. It is cached per filter
@@ -151,8 +152,9 @@ docker run -p 8000:8000 sales-api
 | `CACHE_TTL_SECONDS` / `CACHE_MAXSIZE` | API | `3600` / `512` | Response cache |
 | `DUCKDB_MEMORY_LIMIT` / `DUCKDB_THREADS` | API | `256MB` / auto | Fit small instances |
 | `WARM_CACHE` | API | `1` | Pre-compute the default dashboard at startup |
-| `ANTHROPIC_API_KEY` | API | none | Enables the optional AI summary; without it the feature is hidden |
-| `AI_MODEL` / `AI_MAX_CALLS_PER_HOUR` | API | `claude-opus-5-5` / `30` | Model for the AI summary; cap on uncached model calls |
+| `GROQ_API_KEY` / `ANTHROPIC_API_KEY` | API | none | Either one enables the optional AI summary; with neither, the feature is hidden |
+| `AI_PROVIDER` | API | auto (Groq if its key is set, else Anthropic) | Force `groq` or `anthropic` |
+| `AI_MODEL` / `AI_MAX_CALLS_PER_HOUR` | API | `openai/gpt-oss-120b` (Groq) or `claude-opus-5-5` / `30` | Model override; cap on uncached model calls |
 
 ## Architecture and decisions
 
@@ -276,10 +278,18 @@ top of it:
    monthly revenue (partial months labelled), the outlet / order-type /
    channel / category mix, and the 8 rule-based insights. All numbers are
    **already formatted** (₹ with L/Cr, percentages).
-2. Claude (`claude-opus-5-5`, low effort) gets those facts as JSON. The system
-   prompt says to use only numbers that appear there, copied exactly. A JSON
-   schema (structured outputs) forces the reply into
-   `{headline, points[], actions[]}`, so the UI never parses free text.
+2. An LLM gets those facts as JSON. The system prompt says to use only
+   numbers that appear there, copied exactly. A JSON schema (structured
+   outputs, strict mode) forces the reply into `{headline, points[], actions[]}`,
+   so the UI never parses free text. The server checks the shape again
+   before returning it.
+   - **Groq** (`openai/gpt-oss-120b`, low reasoning effort, free tier) runs the
+     live demo. It's called over plain HTTPS with the standard library, so
+     there's no extra dependency.
+   - **Anthropic** (`claude-opus-5-5`, low effort, refusal fallbacks) is
+     supported via the official SDK.
+   - The provider is one setting (`AI_PROVIDER`). Everything around it
+     (facts, schema, caching, limits) is shared.
 3. **Cost and abuse controls:**
    - Results are cached per normalised filter set. The data is immutable, so
      the same view never triggers a second model call.
@@ -432,7 +442,7 @@ Interactive docs: **`/docs`**.
 | GET | `/api/breakdown` | `dim=outlet\|group\|item\|order_type\|settlement`, `limit` (1–100) | Per category: revenue, orders, quantity, share, revenue per order |
 | GET | `/api/heatmap` | filters | Orders and revenue per weekday (0 = Mon) × hour |
 | GET | `/api/insights` | filters | Up to 8 `{id, title, text, tone, value}` insights |
-| GET | `/api/ai-summary` | filters | Optional Claude brief `{headline, points, actions, model}`; `503` if not configured, `429` when rate-limited |
+| GET | `/api/ai-summary` | filters | Optional LLM brief `{headline, points, actions, model, provider}`; `503` if not configured, `429` when rate-limited |
 | GET | `/api/records` | `page`, `page_size` (≤ 200), `sort`, `order=asc\|desc` | Paginated line items + `total`, `pages` |
 | GET | `/api/export.csv` | filters | Streamed CSV of all matching line items |
 
@@ -440,7 +450,7 @@ Example: `GET /api/breakdown?dim=item&limit=5&outlets=Koramangala,MG Road&start=
 
 ## Testing and CI
 
-- **52 pytest tests** (`backend/tests`), running in ~1 s.
+- **55 pytest tests** (`backend/tests`), running in ~1 s.
   - **ETL:** day-first string parsing vs native datetimes, derived columns,
     and hard failures on inconsistent bills, nulls, bad dates and missing
     columns.
@@ -449,10 +459,11 @@ Example: `GET /api/breakdown?dim=item&limit=5&outlets=Koramangala,MG Road&start=
     date ranges, empty results, `422` validation, SQL-injection attempts,
     unknown sort columns, partial periods, pagination, CSV export, cache
     HIT/MISS on reordered params, gzip and CORS.
-  - **AI summary:** with a fake Claude client. Covers hidden when no key,
+  - **AI summary:** with fake Groq and Claude clients. Covers provider
+    selection, hidden when no key,
     cached per filter set (one model call), the facts payload containing only
-    formatted, filter-correct numbers, rate limiting, refusals and empty
-    selections.
+    formatted, filter-correct numbers, rate limiting, refusals, malformed
+    model output and empty selections.
   - **Real data:** the known totals (300,000 / 110,478 / ₹69,480,952), the
     aggregator-only-on-delivery rule, ₹0 rows being dips, and per-category
     revenues summing to the total.
@@ -468,7 +479,7 @@ Example: `GET /api/breakdown?dim=item&limit=5&outlets=Koramangala,MG Road&start=
 | Scale-out | One instance, in-process cache | Redis or a CDN in front of the read-only GET API; pre-aggregated rollups (day × outlet × channel) if data grows 100× |
 | Pagination | `OFFSET` | Keyset pagination for deep pages |
 | Auth | Public read-only demo (see [Why no authentication](#why-no-authentication)) | OAuth/SSO with outlet-level row filtering (a manager sees only their outlets) |
-| Insights | Rule-based facts plus an optional Claude summary of them | Natural-language questions answered with generated SQL shown to the user; anomaly detection (z-scores on daily revenue per outlet) |
+| Insights | Rule-based facts plus an optional LLM summary of them (Groq or Claude) | Natural-language questions answered with generated SQL shown to the user; anomaly detection (z-scores on daily revenue per outlet) |
 | Analytics | Descriptive | Period-over-period deltas on KPIs, basket analysis (items bought together), forecasting |
 | Hosting | Free tier with cold starts | A paid always-on instance, or a scheduled `/health` ping to keep it warm |
 | Frontend tests | Type-check + lint + manual browser checks | Playwright smoke tests and visual regression |
@@ -517,7 +528,7 @@ Authentication was listed as a bonus. I left it out on purpose:
 │   │   ├── filters.py            filter parsing/validation, WHERE + orders CTE builders
 │   │   ├── queries.py            all analytical SQL
 │   │   ├── insights.py           rule-based insights
-│   │   ├── ai.py                 optional Claude summary of the computed facts
+│   │   ├── ai.py                 optional LLM summary (Groq or Claude) of the computed facts
 │   │   └── cache.py              thread-safe LRU + TTL cache
 │   ├── tests/                    pytest (ETL, API, real-data checks)
 │   ├── scripts/bench.py          latency benchmark
