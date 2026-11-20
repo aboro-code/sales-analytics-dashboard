@@ -21,6 +21,16 @@ export interface Meta {
   min_date: string
   max_date: string
   build: Record<string, string>
+  /** True when the server has an AI key configured (optional feature). */
+  ai_summary?: boolean
+}
+
+export interface AiSummary {
+  headline: string
+  points: string[]
+  actions: string[]
+  model: string
+  generated_ms: number
 }
 
 export interface Summary {
@@ -120,6 +130,7 @@ export const api = {
   },
   heatmap: (f: Filters, signal?: AbortSignal) => getJSON<{ cells: HeatCell[] }>('/api/heatmap', filtersToParams(f), signal),
   insights: (f: Filters, signal?: AbortSignal) => getJSON<{ insights: Insight[] }>('/api/insights', filtersToParams(f), signal),
+  aiSummary: (f: Filters, signal?: AbortSignal) => getJSON<AiSummary>('/api/ai-summary', filtersToParams(f), signal),
   records: (f: Filters, page: number, pageSize: number, sort: string, order: 'asc' | 'desc', signal?: AbortSignal) => {
     const p = filtersToParams(f)
     p.set('page', String(page))

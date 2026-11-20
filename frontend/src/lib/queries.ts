@@ -33,3 +33,13 @@ export const useRecords = (f: Filters, page: number, pageSize: number, sort: str
     queryFn: ({ signal }) => api.records(f, page, pageSize, sort, order, signal),
     ...common,
   })
+
+/** AI brief: only fetched on demand (button click), never retried automatically. */
+export const useAiSummary = (f: Filters, enabled: boolean) =>
+  useQuery({
+    queryKey: ['ai-summary', filterKey(f)],
+    queryFn: ({ signal }) => api.aiSummary(f, signal),
+    enabled,
+    retry: false,
+    staleTime: Infinity,
+  })
